@@ -1,6 +1,9 @@
 use std::fs::read_to_string;
+use std::time::Duration;
+
 use rusqlite::{params, Connection, Result};
 use chrono::{NaiveDate, Local};
+use crossterm::event::{read, poll, Event, KeyCode};
 
 struct Deck {
     name: String,
@@ -11,10 +14,6 @@ struct Flashcard {
     deck_id: i32,
     front: String,
     back: String,
-}
-
-struct FlashcardMeta {
-    question_id: i32,
     added: NaiveDate,
     next: NaiveDate,
     level: i32,
@@ -45,14 +44,7 @@ fn create_tables(conn: &Connection) -> Result<()> {
             id INTEGER PRIMARY KEY,
             deck_id INTEGER,
             front TEXT,
-            back TEXT
-        )"
-    )?;
-
-    create_table(
-        conn,
-        "CREATE TABLE IF NOT EXISTS flashcard_meta (
-            question_id INTEGER,
+            back TEXT,
             added DATE,
             next DATE,
             level INTEGER
@@ -80,16 +72,8 @@ fn insert_deck(conn: &Connection, deck: &Deck) -> Result<()> {
 
 fn insert_flashcard(conn: &Connection, card: &Flashcard) -> Result<()> {
     conn.execute(
-        "INSERT INTO flashcards (deck_id, front, back) VALUES (?1, ?2, ?3)",
-        params![card.deck_id, card.front, card.back],
-    )?;
-    Ok(())
-}
-
-fn insert_flashcard_meta(conn: &Connection, meta: &FlashcardMeta) -> Result<()> {
-    conn.execute(
-        "INSERT INTO flashcard_meta (question_id, added, next, level) VALUES (?1, ?2, ?3, ?4)",
-        params![meta.question_id, meta.added, meta.next, meta.level],
+        "INSERT INTO flashcards (deck_id, front, back, added, next, level) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![card.deck_id, card.front, card.back, card.added, card.next, card.level],
     )?;
     Ok(())
 }
@@ -147,7 +131,9 @@ fn add(conn: &Connection, args: &Vec<String>) {
                 }
             };
 
-            let mut cards = parse_cards(deck_id, &cards[1..]);
+            let added_date = Local::now().naive_utc().date();
+
+            let mut cards = parse_cards(deck_id, &cards[1..], &added_date);
 
             for card in &mut cards {
                 match insert_flashcard(&conn, &card) {
@@ -159,27 +145,6 @@ fn add(conn: &Connection, args: &Vec<String>) {
                     Err(e) => {
                         println!("Error adding flashcard: {}", e);
                     }
-                }
-            }
-
-            for card in &cards {
-                let added_date = Local::now().naive_utc().date();
-
-                let meta = FlashcardMeta {
-                    question_id: card.id,
-                    added: added_date,
-                    next: added_date,
-                    level: 1,
-                };
-
-                match insert_flashcard_meta(&conn, &meta) {
-                    Ok(_) => {
-                        println!("Flashcard meta added: {}", card.front);
-                    },
-                    Err(e) => {
-                        println!("Error adding flashcard meta: {}", e);
-                    }
-                
                 }
             }
         },
@@ -195,7 +160,7 @@ fn get_deck_id_from_name(conn: &Connection, name: &str) -> Result<i32> {
     Ok(id)
 }
 
-fn parse_cards(deck_id: i32, cards: &[&str]) -> Vec<Flashcard> {
+fn parse_cards(deck_id: i32, cards: &[&str], added_date: &NaiveDate) -> Vec<Flashcard> {
     let mut result: Vec<Flashcard> = Vec::new();
 
     for card in cards {
@@ -210,6 +175,9 @@ fn parse_cards(deck_id: i32, cards: &[&str]) -> Vec<Flashcard> {
             deck_id,
             front: sides[0].to_string(),
             back: sides[1].to_string(),
+            added: *added_date,
+            next: *added_date,
+            level: 1,
         };
 
         result.push(c);
@@ -218,10 +186,84 @@ fn parse_cards(deck_id: i32, cards: &[&str]) -> Vec<Flashcard> {
     result
 }
 
+fn clear_key_buffer() {
+    // Continuously read events until there are no more pending events
+    while poll(Duration::from_millis(0)).unwrap() {
+        if let Event::Key(_) = read().unwrap() {
+            // Simply discard the event
+        }
+    }
+}
+
+fn quiz(conn: &Connection, args: &Vec<String>) {
+    if args.len() < 3 {
+        println!("Missing <deck_name>");
+        return;
+    }
+
+    let deck_name = &args[2];
+
+    let deck_id = match deck_name.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            match get_deck_id_from_name(conn, deck_name) {
+                Ok(id) => id,
+                Err(e) => {
+                    println!("Error getting deck id: {}", e);
+                    return;
+                }
+            }
+        }
+    };
+
+    let mut stmt = conn.prepare("SELECT front, back FROM flashcards WHERE deck_id = ?1 and next <= ?2").unwrap();
+    let rows = stmt.query_map(params![deck_id, Local::now().naive_utc().date()], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    }).unwrap();
+
+    clear_key_buffer();
+
+    for row in rows {
+        let (front, back) = row.unwrap();
+        println!("{}", front);
+        println!("press enter to flip");
+
+        loop {
+            // Wait for an event
+            if let Event::Key(key_event) = read().unwrap() {
+                // Check if it's a key press event
+                match key_event.code {
+                    KeyCode::Enter => {
+                        break;
+                    }
+                    _ => (),
+                }
+            }
+        }
+
+        println!("{}", back);
+        println!("Press - O: 1, X: 2");
+
+        loop {
+            // Wait for an event
+            if let Event::Key(key_event) = read().unwrap() {
+                // Check if it's a key press event
+                match key_event.code {
+                    KeyCode::Char('1') => {
+                        break;
+                    }
+                    KeyCode::Char('2') => {
+                        break;
+                    }
+                    _ => (),
+                }
+            }
+        }
+    }
+}
 
 fn main() {
     let args = std::env::args().collect::<Vec<_>>();
-    println!("{:?}", args);
 
     match args.len() {
         0 | 1 => {
@@ -237,6 +279,7 @@ fn main() {
     match command.as_str() {
         "init" => init_db(&conn),
         "add" => add(&conn, &args),
+        "quiz" => quiz(&conn, &args),
         _ => {
             println!("Unknown command: {}", command);
         }
