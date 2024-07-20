@@ -2,8 +2,10 @@ use std::fs::read_to_string;
 use std::time::Duration;
 
 use rusqlite::{params, Connection, Result};
-use chrono::{NaiveDate, Local};
+use chrono::{NaiveDate, Local, Days};
 use crossterm::event::{read, poll, Event, KeyCode};
+use rand::seq::SliceRandom;
+use rand::thread_rng;
 
 struct Deck {
     name: String,
@@ -74,6 +76,22 @@ fn insert_flashcard(conn: &Connection, card: &Flashcard) -> Result<()> {
     conn.execute(
         "INSERT INTO flashcards (deck_id, front, back, added, next, level) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![card.deck_id, card.front, card.back, card.added, card.next, card.level],
+    )?;
+    Ok(())
+}
+
+fn update_flashcard_level(conn: &Connection, id: i32, level: i32, next: &NaiveDate) -> Result<()> {
+    conn.execute(
+        "UPDATE flashcards SET level = ?1, next = ?2 WHERE id = ?3",
+        params![level, next, id],
+    )?;
+    Ok(())
+}
+
+fn insert_flashcard_log(conn: &Connection, log: &FlashcardLog) -> Result<()> {
+    conn.execute(
+        "INSERT INTO flashcard_log (question_id, answer) VALUES (?1, ?2)",
+        params![log.question_id, log.answer],
     )?;
     Ok(())
 }
@@ -195,6 +213,17 @@ fn clear_key_buffer() {
     }
 }
 
+fn level_to_date(level: i32) -> i32 {
+    match level {
+        1 => 1,
+        2 => 4,
+        3 => 10,
+        4 => 25,
+        5 => 50,
+        _ => 1000,
+    }
+}
+
 fn quiz(conn: &Connection, args: &Vec<String>) {
     if args.len() < 3 {
         println!("Missing <deck_name>");
@@ -216,15 +245,23 @@ fn quiz(conn: &Connection, args: &Vec<String>) {
         }
     };
 
-    let mut stmt = conn.prepare("SELECT front, back FROM flashcards WHERE deck_id = ?1 and next <= ?2").unwrap();
-    let rows = stmt.query_map(params![deck_id, Local::now().naive_utc().date()], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    }).unwrap();
+    let mut stmt = conn.prepare("SELECT id, level, front, back FROM flashcards WHERE deck_id = ?1 and next <= ?2").unwrap();
+    let mut rows: Vec<Result<(i32, i32, String, String)>> = stmt.query_map(params![deck_id, Local::now().naive_utc().date()], |row| {
+        Ok((
+            row.get::<_, i32>(0)?,
+            row.get::<_, i32>(1)?,
+            row.get::<_, String>(2)?, 
+            row.get::<_, String>(3)?
+        ))
+    }).unwrap().collect();
+
+    let mut rng = thread_rng();
+    rows.shuffle(&mut rng);
 
     clear_key_buffer();
 
     for row in rows {
-        let (front, back) = row.unwrap();
+        let (id, level, front, back) = row.unwrap();
         println!("{}", front);
         println!("press enter to flip");
 
@@ -250,9 +287,23 @@ fn quiz(conn: &Connection, args: &Vec<String>) {
                 // Check if it's a key press event
                 match key_event.code {
                     KeyCode::Char('1') => {
+                        let next_date = Local::now().naive_local().date()
+                            .checked_add_days(
+                                Days::new(level_to_date(level + 1) as u64)
+                            ).unwrap();
+                        update_flashcard_level(conn, id, level + 1, &next_date).unwrap();
+                        insert_flashcard_log(conn, &FlashcardLog { question_id: id, answer: true }).unwrap();
                         break;
                     }
                     KeyCode::Char('2') => {
+                        let next_date = Local::now().naive_local().date()
+                            .checked_add_days(
+                                Days::new(level_to_date(level) as u64)
+                            ).unwrap();
+                        let next_level = if level > 1 { level - 1 } else { 1 };
+
+                        update_flashcard_level(conn, id, next_level, &next_date).unwrap();
+                        insert_flashcard_log(conn, &FlashcardLog { question_id: id, answer: false }).unwrap();
                         break;
                     }
                     _ => (),

@@ -7,3 +7,4 @@ edition = "2021"
 rusqlite={ version="0.31.0", features=["bundled", "chrono"] }
 chrono="0.4.38"
 crossterm="0.27.0"
+rand="0.8.5"
