@@ -3,8 +3,7 @@ name = "flash"
 version = "0.1.0"
 edition = "2021"
 
+[workspace]
+members = [ "crates/cli", "crates/flashcards","crates/web"]
+
 [dependencies]
-rusqlite={ version="0.31.0", features=["bundled", "chrono"] }
-chrono="0.4.38"
-crossterm="0.27.0"
-rand="0.8.5"
